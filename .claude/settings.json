@@ -1,0 +1,5 @@
+{
+  "permissions": {
+    "allow": ["Read(./.env.example)", "Write(./.env.example)"]
+  }
+}
