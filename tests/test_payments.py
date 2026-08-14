@@ -124,6 +124,22 @@ def test_duplicate_reason_is_explicit_and_only_one_repayment_exists(client):
         db.close()
 
 
+def test_duplicate_response_references_original_event_id_and_received_at(client):
+    """The duplicate rejection response must not report id/received_at as
+    null — it should point back at the original event that actually landed,
+    so a caller can look it up (e.g. via GET /payment-events).
+    """
+    first = client.post("/webhooks/payments", json=_pay("R-15", 1, 20000), headers=TOK).json()
+    original_id = first["event"]["id"]
+    original_received_at = first["event"]["received_at"]
+    assert original_id is not None
+    assert original_received_at is not None
+
+    dup = client.post("/webhooks/payments", json=_pay("R-15", 1, 20000), headers=TOK).json()
+    assert dup["event"]["id"] == original_id
+    assert dup["event"]["received_at"] == original_received_at
+
+
 def test_applied_payment_writes_audit_log(client):
     from app.db import SessionLocal
     from app.models import AuditLog
@@ -170,6 +186,17 @@ def test_accumulated_float_drift_does_not_cause_false_overpayment_rejection(clie
     loan = client.get("/loans/1").json()
     assert loan["status"] == "paid_off"
     assert loan["outstanding"] == 0
+
+
+def test_displayed_outstanding_has_no_float_rounding_artifacts(client):
+    """Regression test: GET /loans/{id} and the webhook's loan block must
+    show a clean outstanding value, not a float subtraction artifact like
+    9333.339999999997, even mid-loan (before any payoff).
+    """
+    client.post("/webhooks/payments", json=_pay("DISP-1", 1, 9333.33), headers=TOK)
+    r = client.post("/webhooks/payments", json=_pay("DISP-2", 1, 9333.33), headers=TOK)
+    assert r.json()["loan"]["outstanding"] == 37333.34  # 56000 - 18666.66, not ...66.6600000001
+    assert client.get("/loans/1").json()["outstanding"] == 37333.34
 
 
 # --- concurrency ---

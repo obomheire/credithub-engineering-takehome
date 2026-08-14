@@ -124,15 +124,29 @@ as `Decimal(str(total_repayable)) - Decimal(str(total_paid))` (see `_outstanding
 reconciliation decision. Regression test:
 `test_accumulated_float_drift_does_not_cause_false_overpayment_rejection`.
 
-**Residual, lower-severity gap**: the `outstanding` value *displayed* in API responses
-(`GET /loans/{id}`, and the `loan` block returned from the webhook) still comes from
-the unmodified `Loan.outstanding` property, so it can still show a value like
-`9333.339999999997` instead of `9333.34` even though the reconciliation *decision*
-is now correct. I left the property itself unchanged because it's existing,
-"inherited" schema code outside this task's scope, and because the fix belongs at
-the response-serialization layer (round for display) or the storage layer (Numeric
-columns), not by special-casing the property. Flagged here rather than silently
-left for someone else to rediscover.
+**A second display-only instance of the same class of bug, also fixed**: the
+`outstanding` value *displayed* in API responses (`GET /loans/{id}`, `GET /loans`, and
+the `loan` block returned from the webhook) went through `_loan_out` in `app/loans.py`,
+which serialized the raw `Loan.outstanding` property — so a caller could still see
+`9333.339999999997` in a response even after the reconciliation-decision bug above was
+fixed. Fixed by computing `outstanding` in `_loan_out` the same way — Decimal
+subtraction on the raw columns — rather than trusting the float property. The model
+property itself (`Loan.outstanding` in `app/models.py`) is left as-is, since it's
+existing "inherited" schema code outside this task's scope and other code may still
+read it directly; the fix is at the serialization boundary, where display values are
+actually produced. Regression test: `test_displayed_outstanding_has_no_float_rounding_artifacts`.
+
+**Duplicate response no longer reports `id`/`received_at` as `null`**: the earlier
+version built a fully transient `PaymentEvent` for a duplicate-rejection response,
+with no `id` and no `received_at` — technically correct (no second row is persisted)
+but an awkward shape for a caller to consume, since there was nothing to look up. Now
+`_duplicate()` looks up the *original* event for that `external_ref` and copies its
+`id`/`received_at`/`processed_at` onto the transient response object, so the response
+points a caller back at the real record of what happened (e.g. via
+`GET /payment-events`) instead of returning nulls. `status`/`reason` on the response
+still correctly say `rejected`/`duplicate_external_ref` for *this* request — only the
+identity/timestamp fields are borrowed from the original. Regression test:
+`test_duplicate_response_references_original_event_id_and_received_at`.
 
 ## Edge cases
 

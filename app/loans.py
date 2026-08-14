@@ -1,5 +1,7 @@
 """Read endpoints for loans (provided — working)."""
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from .db import get_db
@@ -9,13 +11,18 @@ router = APIRouter()
 
 
 def _loan_out(loan: Loan) -> dict:
+    # Loan.outstanding subtracts total_paid from total_repayable as plain
+    # floats, which can leave visible rounding artifacts (e.g.
+    # 9333.339999999997) even when the underlying columns are exact. Compute
+    # it here via Decimal for display instead of trusting the float property.
+    outstanding = Decimal(str(loan.total_repayable)) - Decimal(str(loan.total_paid))
     return {
         "id": loan.id,
         "borrower_name": loan.borrower_name,
         "principal": loan.principal,
         "total_repayable": loan.total_repayable,
         "total_paid": loan.total_paid,
-        "outstanding": loan.outstanding,
+        "outstanding": float(outstanding),
         "status": loan.status.value,
     }
 

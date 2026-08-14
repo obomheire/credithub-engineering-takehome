@@ -51,9 +51,12 @@ def reconcile_payment(db: Session, payload: PaymentPayload) -> tuple[PaymentEven
     authority — if two requests race past the pre-check, the loser's insert
     violates the constraint and is turned into the same duplicate outcome.
     """
-    if db.query(PaymentEvent).filter(PaymentEvent.external_ref == payload.external_ref).first():
+    original = (
+        db.query(PaymentEvent).filter(PaymentEvent.external_ref == payload.external_ref).first()
+    )
+    if original is not None:
         loan = db.query(Loan).filter(Loan.id == payload.loan_id).first()
-        return _duplicate(payload), loan
+        return _duplicate(payload, original), loan
 
     event = PaymentEvent(
         external_ref=payload.external_ref,
@@ -67,8 +70,13 @@ def reconcile_payment(db: Session, payload: PaymentPayload) -> tuple[PaymentEven
         db.flush()  # surfaces a duplicate external_ref before we touch any loan
     except IntegrityError:
         db.rollback()
+        original = (
+            db.query(PaymentEvent)
+            .filter(PaymentEvent.external_ref == payload.external_ref)
+            .first()
+        )
         loan = db.query(Loan).filter(Loan.id == payload.loan_id).first()
-        return _duplicate(payload), loan
+        return _duplicate(payload, original), loan
 
     loan = db.query(Loan).filter(Loan.id == payload.loan_id).with_for_update().first()
 
@@ -131,18 +139,24 @@ def _audit_rejected(db: Session, event: PaymentEvent, reason: str) -> None:
     )
 
 
-def _duplicate(payload: PaymentPayload) -> PaymentEvent:
+def _duplicate(payload: PaymentPayload, original: PaymentEvent) -> PaymentEvent:
     """This external_ref already has a PaymentEvent (idempotency key already
     used) — either seen by the pre-check or discovered via a unique-constraint
     violation on a concurrent insert. We do not persist a second row for this
     redelivery: the object below is transient, built only to serialize a
-    'rejected: duplicate' response for *this* request.
+    'rejected: duplicate' response for *this* request. Its id/received_at
+    reference the original event — the real record of what actually happened
+    for this external_ref — rather than being null, so a caller can look the
+    original up (e.g. via GET /payment-events).
     """
     return PaymentEvent(
+        id=original.id,
         external_ref=payload.external_ref,
         loan_id=payload.loan_id,
         amount=payload.amount,
         channel=payload.channel,
         status=PaymentStatus.rejected,
         reason="duplicate_external_ref",
+        received_at=original.received_at,
+        processed_at=original.processed_at,
     )
