@@ -65,7 +65,11 @@ class PaymentEvent(Base):
     __tablename__ = "payment_events"
 
     id = Column(Integer, primary_key=True)
-    external_ref = Column(String, nullable=False)  # rail's payment id (idempotency key)
+    # Unique at the DB level: this is the idempotency key. A rail redelivering
+    # the same external_ref must never result in two applied repayments — see
+    # app/services/payment_reconciliation.py for how the resulting
+    # IntegrityError on a race is turned into a "duplicate" rejection.
+    external_ref = Column(String, nullable=False, unique=True)
     loan_id = Column(Integer, ForeignKey("loans.id"), nullable=False)
     amount = Column(Float, nullable=False)
     channel = Column(String, nullable=False, default="paystack")

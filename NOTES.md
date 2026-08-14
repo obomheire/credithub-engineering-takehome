@@ -1,0 +1,241 @@
+# NOTES
+
+## Key decisions
+
+### Idempotency
+
+`external_ref` is the rail's idempotency key. `PaymentEvent.external_ref` now has a
+**DB-level unique constraint** (`app/models.py`) — the database, not application code,
+is the final authority on "have we seen this payment before."
+
+`reconcile_payment` (`app/services/payment_reconciliation.py`) does an application-level
+pre-check first (cheap, avoids a round trip in the common case), then attempts the
+insert. If two requests race past the pre-check, the loser's `db.flush()` raises
+`IntegrityError` on the constraint — caught, rolled back, and turned into a
+`rejected` / `duplicate_external_ref` response. No second `PaymentEvent` row is ever
+written for a redelivery; only one `Repayment` can ever exist per `external_ref`.
+
+### Transaction strategy
+
+One `Session` per request (FastAPI's existing `Depends(get_db)`), one `db.commit()`
+per reconciliation outcome. The flow inside `reconcile_payment`:
+
+1. Insert `PaymentEvent` (status `pending`), `flush()` — this is what surfaces a
+   duplicate before any loan row is touched.
+2. Load the loan with `with_for_update()`.
+3. Validate → either mark the event `rejected` with a reason, or create the
+   `Repayment`, update the loan, mark the event `applied`.
+4. Write an audit record via the existing `record_audit` helper (adds to the same
+   session, doesn't commit — by design, per its docstring).
+5. Single `db.commit()` covers the event, the loan mutation (if any), the repayment
+   (if any), and the audit row together. A failure anywhere before that commit rolls
+   everything back — there is no path that leaves `PaymentEvent.status == applied`
+   without a matching `Repayment`, updated `Loan`, and `AuditLog` row.
+
+### Concurrency strategy
+
+Two scenarios, two different mechanisms:
+
+- **Same `external_ref` racing** — protected by the DB unique constraint (see
+  Idempotency above). This works regardless of database engine.
+- **Same loan, two different payments racing** — the loan row is loaded with
+  `with_for_update()`. On the real target database (Postgres, per `app/db.py`'s own
+  docstring — SQLite here is only for zero-setup local running) this takes a row lock,
+  so the second transaction blocks until the first commits, then reads the *updated*
+  `total_paid` before validating — it cannot compute overpayment against a stale
+  balance.
+
+  **Honest limitation**: this repo runs on SQLite, and SQLite does not have real
+  row-level locking — `with_for_update()` is close to a no-op there. What actually
+  protects correctness in this test environment is SQLite's own single-writer
+  serialization (one write transaction at a time at the file level); a second writer
+  blocks/retries until the first finishes. I verified this empirically with a
+  multi-threaded test (`test_concurrent_payments_same_loan_never_overdraw` in
+  `tests/test_payments.py`, run 15x with no flakes) rather than just asserting it in
+  prose. The `with_for_update()` call is still correct and left in place because it's
+  the right statement of intent for the production database this schema is modeled
+  on — removing it would be wrong for Postgres even though it's inert here. A true
+  concurrent-Postgres integration test would be stronger evidence than what SQLite in
+  this test harness can offer; I did not have that database available in this
+  environment.
+
+### Overpayment policy
+
+**Reject the entire payment** if it would exceed the loan's outstanding balance — no
+partial application. Example: outstanding 50,000, incoming payment 60,000 → the event
+is rejected with `reason=overpayment`, no `Repayment` is created, and the loan is
+untouched.
+
+Rationale: partially applying a payment and leaving a residual 10,000 unaccounted for
+creates an unresolved financial state with no defined owner. A real system needs an
+explicit policy for that residual — refund to the payer, credit to the borrower's
+account, or a suspense/clearing account pending manual review — and none of those
+exist here. Rejecting the whole payment keeps every dollar traceable to a decision:
+either it's fully applied, or it's sitting with the rail/gateway until someone
+resolves it. This is the safer default in the absence of that policy.
+
+### Audit strategy
+
+Every reconciliation outcome writes an `AuditLog` row via the existing `record_audit`
+helper, in the same transaction as the financial change:
+
+- Applied: `action=payment.applied`, `entity=loan`, `entity_id=<loan id>`, detail
+  includes the payment event id, `external_ref`, and amount.
+- Rejected (loan-state / amount reasons): `action=payment.rejected`,
+  `entity=payment_event`, `entity_id=<event id>`, detail includes `external_ref` and
+  the reason code.
+- Duplicate redeliveries do **not** get a fresh audit row, because no new
+  `PaymentEvent` is persisted for them (see Idempotency) — there's nothing new to
+  audit against. The original event's own audit trail (from when it first landed)
+  already exists. This is a reasonable gap to flag, not a hidden one: a production
+  system would likely still want a lightweight "redelivery observed" log line for
+  operational visibility, even without a new business record. Not implemented here.
+
+### Money handling
+
+`Loan`, `PaymentEvent`, and `Repayment` amounts stay `Float` — that's the schema this
+task says to treat as inherited, and changing it would mean an Alembic-style migration
+this project has no tooling for. Instead, every comparison and arithmetic operation
+that matters financially (overpayment check, exact-payoff check, balance update) goes
+through `Decimal(str(x))` inside `app/services/payment_reconciliation.py`, and the
+result is cast back to `float` only when writing to the column. `Decimal(str(x))`
+(not `Decimal(x)`) specifically avoids importing the binary float's own rounding
+error into the Decimal.
+
+This is a mitigation, not a fix — floats are still the storage format, so values that
+can't be exactly represented in binary floating point can still drift over many
+operations. The correct fix is `Numeric`/fixed-point columns (or integer minor units)
+on a real migration, which is out of scope here per the "don't rewrite the schema"
+instruction. Flagged under "Before production" below.
+
+**A real bug this caught, found during manual QA, not by the test suite**: the
+overpayment/payoff check originally computed outstanding via `Decimal(str(loan.outstanding))`
+— reusing the `Loan.outstanding` Python property (`total_repayable - total_paid`,
+`app/models.py`). That property does the subtraction in plain `float` *before* any
+`Decimal` conversion happens, so float rounding error from the subtraction itself was
+already baked into the number by the time it reached `Decimal(str(...))`. Concretely:
+after two payments of 9333.33 against a loan with `total_repayable=56000.0`,
+`total_paid` was stored as an exact `46666.66`, but `56000.0 - 46666.66` in float
+arithmetic evaluates to `9333.339999999997`, not `9333.34`. The borrower's exact,
+correct final installment of `9333.34` was then rejected as an `overpayment` against
+that drifted value. Fixed by computing outstanding directly from the two raw columns
+as `Decimal(str(total_repayable)) - Decimal(str(total_paid))` (see `_outstanding()` in
+`app/services/payment_reconciliation.py`), never through the float property, for the
+reconciliation decision. Regression test:
+`test_accumulated_float_drift_does_not_cause_false_overpayment_rejection`.
+
+**Residual, lower-severity gap**: the `outstanding` value *displayed* in API responses
+(`GET /loans/{id}`, and the `loan` block returned from the webhook) still comes from
+the unmodified `Loan.outstanding` property, so it can still show a value like
+`9333.339999999997` instead of `9333.34` even though the reconciliation *decision*
+is now correct. I left the property itself unchanged because it's existing,
+"inherited" schema code outside this task's scope, and because the fix belongs at
+the response-serialization layer (round for display) or the storage layer (Numeric
+columns), not by special-casing the property. Flagged here rather than silently
+left for someone else to rediscover.
+
+## Edge cases
+
+- **Duplicate webhook** (sequential redelivery): first call applies, second is
+  rejected `duplicate_external_ref`, loan balance changes exactly once. Covered by
+  `test_duplicate_external_ref_is_rejected` and
+  `test_duplicate_reason_is_explicit_and_only_one_repayment_exists`.
+- **Concurrent duplicate webhook**: two threads fire the same `external_ref`
+  simultaneously; exactly one applies, the DB unique constraint decides the loser
+  regardless of thread scheduling. Covered by
+  `test_concurrent_duplicate_external_ref_applies_only_once`.
+- **Concurrent payments on the same loan**: two different payments race, together
+  exceeding the outstanding balance; the loan never goes negative, exactly one
+  applies. Covered by `test_concurrent_payments_same_loan_never_overdraw`. See the
+  SQLite-vs-Postgres caveat under Concurrency strategy above.
+- **Unknown loan**: event is recorded and rejected `unknown_loan`; response's `loan`
+  key is `null` (nothing to serialize). Covered by `test_unknown_loan_reason_is_explicit`.
+- **Closed/inactive loan**: rejected `loan_not_active` (covers `cancelled`,
+  `paid_off`, `written_off` uniformly), loan untouched. Covered by
+  `test_closed_loan_reason_is_explicit`.
+- **Overpayment**: rejected `overpayment`, no partial application, loan untouched.
+  Covered by `test_overpayment_is_rejected` and
+  `test_rejected_event_reports_reason_and_creates_no_repayment`.
+- **Exact payoff**: `total_paid` reaches `total_repayable` exactly (via `Decimal`
+  equality, not float `==`), loan flips to `paid_off`. Covered by
+  `test_exact_payoff_closes_loan`.
+
+## Before production
+
+Being explicit about what's *not* here:
+
+- **No provider signature verification.** Auth is a static shared secret
+  (`X-Webhook-Token`, existing `require_webhook_token`). A real gateway signs
+  payloads (HMAC or similar) so the receiver can verify the request actually came
+  from the provider and wasn't replayed/forged by anyone who obtained the shared
+  token. Noted as optional in the README; not implemented.
+- **No replay protection beyond the idempotency key itself.** There's no timestamp
+  window, nonce, or signature-replay defense — only the `external_ref` uniqueness.
+- **No structured logging or metrics.** No log lines around reconciliation decisions,
+  no counters/histograms for applied vs rejected rates, latency, etc. An operator
+  today can only see outcomes via `GET /payment-events`.
+- **No alerting.** A spike in `overpayment` or `duplicate_external_ref` rejections
+  (which could indicate a gateway bug or a fraud pattern) would go unnoticed.
+- **No provider reconciliation job.** Nothing periodically cross-checks the
+  provider's own ledger against ours to catch missed webhooks (rails can silently
+  fail to deliver, not just redeliver).
+- **No retry/dead-letter handling.** If reconciliation raises an unexpected
+  (non-business) error, the request fails and it's entirely on the rail's own retry
+  behavior to redeliver — there's no queue or DLQ on our side.
+- **No settlement/reversal/chargeback flow.** A `Repayment` is permanent once
+  applied; there's no way to reverse one if a payment later bounces or is disputed.
+- **No refund or suspense-account flow.** The overpayment policy explicitly rejects
+  the whole payment rather than partially applying it, precisely because those flows
+  don't exist yet (see Overpayment policy above).
+- **Money is still `Float` at rest.** Decimal is used for the comparisons that matter
+  at reconciliation time, but the schema itself isn't precision-safe. A real
+  migration to `Numeric`/integer minor units would be the fix.
+- **No RBAC for admin operations.** There's no admin-facing mutation endpoint in this
+  submission, but if one were added (e.g., manual reconciliation override), it would
+  need real authorization beyond the webhook token.
+- **No rate limiting** on the webhook endpoint.
+- **Secrets management**: the webhook token is a hardcoded string in `app/auth.py`
+  (`WEBHOOK_TOKEN = "dev-webhook-secret"`), unchanged from what was already there —
+  a real deployment needs this in a secrets manager / env var, rotated periodically.
+- **No operational monitoring / health checks beyond `GET /health`.**
+- **SQLite in this environment** means the concurrency protection for
+  same-loan races leans on SQLite's own single-writer behavior rather than a proven
+  Postgres row lock — see the Concurrency strategy section for the full caveat.
+
+## AI usage
+
+This implementation was built with Claude Code (Claude models), used as follows:
+
+- **Exploration**: I had Claude read the full backend (`models.py`, `db.py`,
+  `auth.py`, `audit.py`, `payments.py`, `loans.py`, the existing test suite, and
+  `conftest.py`) and report back the exact model fields, session/transaction
+  lifecycle, and test expectations before any code was written, specifically to
+  avoid guessing at conventions that already existed (e.g., that `record_audit`
+  intentionally doesn't commit, that there's no Alembic, that SQLite doesn't enforce
+  FKs by default).
+- **Design**: I asked Claude to draft the reconciliation algorithm, transaction
+  boundaries, and idempotency/concurrency strategy as a plan before writing code, and
+  reviewed it against the task's explicit requirements line by line (e.g., confirming
+  the `{event, loan}` response shape matched what the existing tests actually assert,
+  not just what seemed reasonable).
+- **Implementation**: Claude wrote `app/services/payment_reconciliation.py` and the
+  route wiring in `app/payments.py`. I reviewed and corrected one real bug in the
+  first draft: the initial duplicate-handling path returned the *original* (already
+  applied) `PaymentEvent` row for a redelivery, which would have reported
+  `status=applied` instead of `status=rejected` for the second request — failing the
+  existing `test_duplicate_external_ref_is_rejected` test. I redirected the design to
+  build a transient, unpersisted `PaymentEvent` for the duplicate response instead of
+  persisting or mutating a second row, and to add an application-level pre-check
+  ahead of the DB constraint so the common (non-racing) duplicate case doesn't need a
+  failed insert + rollback round trip.
+- **Testing**: I directed the concurrency test design explicitly (real `threading`
+  + `threading.Barrier` against the same `TestClient`, not mocked), and asked for the
+  concurrency tests to be run repeatedly (15x) to check for flakiness before trusting
+  them, since a single green run of a race-condition test proves little.
+- **What I verified manually, not just trusted**: ran the full test suite (`pytest`,
+  21 tests, all passing); inspected the actual SQLite schema after a fresh seed to
+  confirm the `UNIQUE (external_ref)` constraint was really created; ran the server
+  and hit the webhook directly with `curl` for the no-token/valid/duplicate/unknown-loan
+  cases to see real HTTP responses, not just test assertions; read every line of the
+  final diff against each numbered requirement in the assignment brief.
+</content>

@@ -135,23 +135,3 @@ Do not be optimistic.
 Act as a senior QA engineer whose job is to find problems before users do.
 
 Require evidence before declaring a task complete.
-
-## Test Accounts
-
-Use these accounts when verifying endpoints that require authentication. If they do not exist in the database, create them via the registration endpoint (or directly via the DB) before running tests.
-
-### Admin Account
-- **First Name:** Test
-- **Last Name:** Admin
-- **Email:** testadmin@loopscribe.com
-- **Password:** Secret@123
-- **Role:** `admin`
-
-### User Account
-- **First Name:** Test
-- **Last Name:** User
-- **Email:** testauser@loopscribe.com
-- **Password:** Secret@123
-- **Role:** `user`
-
-When a test requires a JWT, obtain it by calling `POST /api/v1/auth/login` with the relevant credentials and use the returned token as a `Bearer` token in subsequent requests.

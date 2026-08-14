@@ -1,20 +1,23 @@
 """Payment ingestion + reconciliation.
 
-Provided (working): the payments feed (``GET /payment-events``).
-
->>> YOUR TASK is the webhook that reconciles an incoming payment ON RECEIPT —
-    ``POST /webhooks/payments``. See the stub at the bottom and README.md. <<<
+``GET /payment-events`` is the payments feed. ``POST /webhooks/payments`` is
+where an incoming payment lands and is reconciled on receipt — see
+app/services/payment_reconciliation.py for the reconciliation logic and
+NOTES.md for the design rationale.
 
 The frontend's "Simulate incoming payment" button POSTs a synthetic payment to
 this webhook — exactly as a real gateway/rail would. There is no separate
 "apply" step: a payment arrives and is reconciled in the same call.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
+from .auth import require_webhook_token
 from .db import get_db
+from .loans import _loan_out
 from .models import PaymentEvent
+from .services.payment_reconciliation import PaymentPayload, reconcile_payment
 
 router = APIRouter()
 
@@ -47,9 +50,22 @@ def list_payment_events(db=Depends(get_db)):
     return [_event_out(e) for e in events]
 
 
-@router.post("/webhooks/payments", status_code=501)
-def receive_payment(body: PaymentIn):
-    """TODO(candidate): a payment just arrived from a rail — reconcile it on
-    receipt. Remove this stub and implement it. See README.md for the contract.
+@router.post("/webhooks/payments")
+def receive_payment(
+    body: PaymentIn, db=Depends(get_db), _token=Depends(require_webhook_token)
+):
+    """A payment arrived from a rail — reconcile it on receipt. Always 200
+    once authenticated: business outcomes (applied/rejected) are reported in
+    the response body, not via HTTP status. See NOTES.md.
     """
-    raise HTTPException(status_code=501, detail="not implemented — this is your task")
+    payload = PaymentPayload(
+        external_ref=body.external_ref,
+        loan_id=body.loan_id,
+        amount=body.amount,
+        channel=body.channel,
+    )
+    event, loan = reconcile_payment(db, payload)
+    return {
+        "event": _event_out(event),
+        "loan": _loan_out(loan) if loan is not None else None,
+    }
