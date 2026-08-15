@@ -1,0 +1,45 @@
+{
+  "skill_name": "playwright-tester",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I just updated the contact form on my site. Can you test it? The dev server runs on localhost:3000. The form is at /contact and has name, email, and message fields with a submit button.",
+      "expected_output": "Creates .spec.ts test files covering happy path and validation, runs them via npx playwright test, reports pass/fail results. Does NOT drive the browser live with AI tokens on every interaction.",
+      "files": [],
+      "expectations": [
+        "Creates at least one .spec.ts file in a tests/ or e2e/ directory",
+        "Test file uses Playwright test API (import { test, expect } from '@playwright/test')",
+        "Tests cover both valid submission (happy path) and at least one validation case (empty required field)",
+        "Runs tests via npx playwright test, not by driving the browser interactively",
+        "Reports a clear summary of test results (pass/fail counts)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use the playwright-tester skill in swarm mode to thoroughly test my e-commerce checkout flow. The app runs on localhost:5173. There's a product page at /products, a cart at /cart, and checkout at /checkout with payment form fields.",
+      "expected_output": "Spawns multiple sub-agents that each write test files for different testing strategies (happy path, validation, edge cases). Then runs all tests natively via npx playwright test. Sub-agents author tests, they don't drive browsers.",
+      "files": [],
+      "expectations": [
+        "Uses sub-agents or parallel approach to write tests from multiple angles",
+        "Creates multiple .spec.ts files organized by test strategy",
+        "Tests cover the full checkout flow (browse -> add to cart -> checkout -> payment)",
+        "Includes edge case tests (empty cart checkout, invalid payment info, etc.)",
+        "Runs the combined test suite via npx playwright test (single native execution)",
+        "Reports results from all test files in a unified summary"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I ran my playwright tests and 3 of them are failing. Can you look at the test output, figure out what's wrong, and fix them? Here's the output:\n\nFAILED: tests/e2e/contact-form.spec.ts:15 - submits form with valid data\n  Error: locator.click: Error: strict mode violation: getByRole('button', { name: 'Submit' }) resolved to 2 elements\n\nFAILED: tests/e2e/contact-form.spec.ts:28 - shows error for empty email\n  Error: Timed out 5000ms waiting for expect(locator).toBeVisible()\n\nFAILED: tests/e2e/contact-form.spec.ts:41 - validates email format\n  Error: expect(received).toHaveText('Please enter a valid email')\n  Expected: 'Please enter a valid email'\n  Received: 'Invalid email address'",
+      "expected_output": "Diagnoses each failure correctly (ambiguous selector, timing issue, changed error text), fixes the test file, and reruns. Distinguishes between test bugs and app bugs.",
+      "files": [],
+      "expectations": [
+        "Correctly identifies the first failure as an ambiguous selector (needs more specific locator)",
+        "Correctly identifies the second failure as a timing issue (needs waitFor or longer timeout)",
+        "Correctly identifies the third failure as a text mismatch (test expects wrong string)",
+        "Fixes the test file rather than modifying application code for test bugs",
+        "Reruns tests after fixing to verify the fixes work"
+      ]
+    }
+  ]
+}
