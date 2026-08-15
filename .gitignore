@@ -7,5 +7,7 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/test-results/
+frontend/playwright-report/
 .DS_Store
 .env
