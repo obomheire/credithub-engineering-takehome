@@ -11,3 +11,4 @@ frontend/test-results/
 frontend/playwright-report/
 .DS_Store
 .env
+api-docs/

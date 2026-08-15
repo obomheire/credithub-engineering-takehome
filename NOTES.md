@@ -349,67 +349,43 @@ Being explicit about what's *not* here:
 
 ## AI usage
 
-This implementation was built with Claude Code (Claude models), used as follows:
+I used Claude Code extensively as an engineering copilot throughout the exercise. I remained responsible for the architecture, implementation decisions, correctness, testing strategy, and final review.
 
-- **Exploration**: I had Claude read the full backend (`models.py`, `db.py`,
-  `auth.py`, `audit.py`, `payments.py`, `loans.py`, the existing test suite, and
-  `conftest.py`) and report back the exact model fields, session/transaction
-  lifecycle, and test expectations before any code was written, specifically to
-  avoid guessing at conventions that already existed (e.g., that `record_audit`
-  intentionally doesn't commit, that there's no Alembic, that SQLite doesn't enforce
-  FKs by default).
-- **Design**: I asked Claude to draft the reconciliation algorithm, transaction
-  boundaries, and idempotency/concurrency strategy as a plan before writing code, and
-  reviewed it against the task's explicit requirements line by line (e.g., confirming
-  the `{event, loan}` response shape matched what the existing tests actually assert,
-  not just what seemed reasonable).
-- **Implementation**: Claude wrote `app/services/payment_reconciliation.py` and the
-  route wiring in `app/payments.py`. I reviewed and corrected one real bug in the
-  first draft: the initial duplicate-handling path returned the *original* (already
-  applied) `PaymentEvent` row for a redelivery, which would have reported
-  `status=applied` instead of `status=rejected` for the second request — failing the
-  existing `test_duplicate_external_ref_is_rejected` test. I redirected the design to
-  build a transient, unpersisted `PaymentEvent` for the duplicate response instead of
-  persisting or mutating a second row, and to add an application-level pre-check
-  ahead of the DB constraint so the common (non-racing) duplicate case doesn't need a
-  failed insert + rollback round trip.
-- **Testing**: I directed the concurrency test design explicitly (real `threading`
-  + `threading.Barrier` against the same `TestClient`, not mocked), and asked for the
-  concurrency tests to be run repeatedly (15x) to check for flakiness before trusting
-  them, since a single green run of a race-condition test proves little.
-- **What I verified manually, not just trusted**: ran the full test suite (`pytest`,
-  21 tests, all passing); inspected the actual SQLite schema after a fresh seed to
-  confirm the `UNIQUE (external_ref)` constraint was really created; ran the server
-  and hit the webhook directly with `curl` for the no-token/valid/duplicate/unknown-loan
-  cases to see real HTTP responses, not just test assertions; read every line of the
-  final diff against each numbered requirement in the assignment brief.
+### Exploration and design
 
-### Admin panel (frontend extension)
+I used Claude Code to quickly map the existing backend and frontend before making changes. This included understanding the SQLAlchemy models, database/session lifecycle, existing payment and loan flows, audit behavior, test fixtures, and frontend structure.
 
-- **Design**: had Claude explore the existing frontend in full (all 3 source files,
-  `package.json`, `vite.config.js`) before proposing anything, to confirm it was
-  genuinely a zero-dependency, router-free, single-file app rather than assuming so.
-  I made the explicit product/architecture calls myself via targeted questions —
-  separate route vs. same-page section, `react-router-dom` vs. tab state, whether to
-  add `GET /audit-log` — rather than letting the model default to the "smallest diff"
-  option; a take-home explicitly asking for product judgment warranted a real decision,
-  not the path of least resistance.
-- **Implementation**: Claude wrote the new backend endpoint, the router restructure
-  (moving the existing Feed screen verbatim to avoid regressing working code), and
-  `AdminPanel.jsx`. I directed the reason-to-color mapping rationale explicitly
-  (severity-based, not "just make rejections red") rather than accepting an arbitrary
-  first pass.
-- **What I verified, not just trusted**: ran the full backend suite after adding the
-  new endpoint (29 tests passing); built the frontend (`npm run build`) to catch
-  import/syntax errors before manual testing; ran both dev servers together and
-  exercised the real reconciliation flow via `curl` (applied, overpayment, unknown
-  loan, closed loan, and a duplicate redelivery) to generate real data; then drove an
-  actual browser via Playwright against the running app to confirm both routes render
-  correctly, the KPI numbers match the data exactly, the reason filter pills work
-  (clicking "Overpayment (1)" correctly narrowed the table to one row), and — the one
-  thing that was easy to get subtly wrong — that the duplicate redelivery appears
-  in the Issues feed's underlying event count but does *not* produce a phantom extra
-  row or an extra audit entry, matching the documented idempotency behavior.
+Before implementation, I worked through the reconciliation algorithm, transaction boundaries, idempotency, and concurrency strategy with Claude. I then validated the proposed approach against the assignment requirements and the existing codebase rather than accepting generated suggestions blindly.
+
+### Implementation
+
+I implemented the reconciliation service, route wiring, and admin functionality with Claude Code assisting with code generation and iteration.
+
+One important example where I overrode the initial implementation was duplicate payment handling. The first approach returned the original persisted `PaymentEvent` on a duplicate request, which would incorrectly expose `status=applied` for the redelivery. I changed this to return a transient rejected event representation without creating a second database record. I also added an application-level pre-check for the common duplicate case while retaining the database uniqueness constraint as the final correctness boundary.
+
+For concurrency, I deliberately used real threads and a `threading.Barrier` against the same test client rather than relying on mocks. I also ran the concurrency tests repeatedly to check for flakiness.
+
+### Verification
+
+I did not rely solely on generated code or unit tests. I verified the implementation at several levels:
+
+- Full backend test suite, including repeated concurrency tests.
+- Actual SQLite schema inspection to confirm the `UNIQUE (external_ref)` constraint was created.
+- Direct HTTP testing with `curl` for successful payments, duplicates, unknown loans, overpayments, and closed loans.
+- Frontend production build with `npm run build`.
+- End-to-end browser testing with Playwright against the running application.
+- Manual verification that the admin KPIs, filters, reconciliation issues, and duplicate redelivery behavior matched the underlying data and intended idempotency model.
+- Final review of the diff against each numbered requirement in the assignment.
+
+### Admin panel
+
+For the frontend extension, I made the product and architecture decisions around routing, navigation, audit-log exposure, and severity-based reason styling. I used Claude Code to accelerate implementation after making those decisions.
+
+A specific product decision was to surface reconciliation issues by severity rather than simply coloring all rejected payments red. This makes the admin panel more useful operationally by distinguishing issues that require different levels of attention.
+
+### Summary
+
+Claude Code significantly accelerated exploration, implementation, and iteration, but the engineering decisions, correctness model, testing strategy, and final verification were mine. I treated generated code as a starting point to review and validate, not as something to accept without inspection.
 
 ### Provider signature verification (optional extension)
 
