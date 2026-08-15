@@ -148,6 +148,64 @@ still correctly say `rejected`/`duplicate_external_ref` for *this* request — o
 identity/timestamp fields are borrowed from the original. Regression test:
 `test_duplicate_response_references_original_event_id_and_received_at`.
 
+### Admin reconciliation & issues panel (frontend)
+
+Built as a genuinely separate page (`/admin`, via `react-router-dom`) rather than a
+section bolted onto the existing feed screen, reachable via a small nav bar
+(`frontend/src/components/NavBar.jsx`) shared by both routes. The existing feed
+screen (`frontend/src/pages/Feed.jsx`) was moved there verbatim from the old
+`App.jsx` — no logic changes — with `App.jsx` reduced to a router shell.
+
+**Data sources**: primarily `GET /payment-events` (already had everything needed —
+`status`, `reason`, timestamps — for the issues/health view, no backend change
+required for that part). A new **`GET /audit-log`** endpoint
+(`app/audit_log.py`) exposes the already-populated `AuditLog` table for a secondary
+"activity trail" section. It's unauthenticated and unpaginated, deliberately
+matching `GET /loans`/`GET /payment-events`'s existing convention — `X-Webhook-Token`
+gates the *inbound webhook* specifically (a different trust boundary than an
+internal read), so introducing a different auth model for one new GET endpoint
+would be an inconsistency, not a real security improvement, at this scope.
+
+**Layout, issues first**: a 3-tile KPI row (total reconciled, applied, failure rate
+with a red left-border accent when > 0) sits above an "Issues needing attention"
+card — filterable by a reason-code pill bar — which is placed *before* the
+"Reconciled" (applied) section, per the requirement that issues be front and
+centre. The activity trail is last and visually lightest (a compact list, not
+another table), since its `detail` strings otherwise duplicate what the Issues/
+Reconciled tables already show; its distinct value is being actor/action-centric.
+
+**Reason-to-color mapping is deliberate, not "everything red":** `unknown_loan` is
+red (most severe — money referencing a loan that doesn't exist, needs
+investigation); `duplicate_external_ref` is grey (benign, expected rail
+redelivery — not a failure of business logic); `loan_not_active`/`invalid_amount`
+are amber (actionable, not urgent); `overpayment` is blue (informational — a
+business decision about the money, not really an "error"). All five reuse the
+existing CSS custom-property color pairs already defined for loan/payment status
+badges — no new colors invented.
+
+**A real, verified backend quirk surfaces in the UI, not silently "fixed":** a
+duplicate redelivery never gets its own `PaymentEvent` row (see the idempotency
+section above), so it's never separately audited either. The Issues table (from
+`/payment-events`) will show a duplicate's *original* rejection reason if it was
+rejected, or nothing distinct if it was applied — but the Activity trail (from
+`/audit-log`) will show strictly fewer entries than payment events whenever
+duplicates occurred. This was manually verified end-to-end (via `curl` and a
+Playwright-driven browser check against the running dev servers) rather than
+assumed, and is called out with a code comment in `AdminPanel.jsx` so it isn't
+mistaken for a bug later.
+
+**Frontend testing scope**: no new test framework (no Vitest/RTL) was introduced.
+The panel's derived logic (grouping rejections by reason, computing failure rate)
+is simple array filtering over already server-validated enum data — disproportionate
+to justify new test tooling in an app that had deliberately stayed dependency-free
+beyond React+Vite. Coverage instead comes from: the backend's `tests/test_audit_log.py`
+(5 tests covering the new endpoint's behavior, including the duplicate-not-audited
+case) and manual end-to-end verification (curl against every reconciliation outcome,
+then a real browser session confirming both routes render correctly, the reason
+filter interaction works, and the numbers match). If this were headed to
+production or the panel grew more complex, Vitest + React Testing Library around
+the derivation functions would be the natural next step.
+
 ## Edge cases
 
 - **Duplicate webhook** (sequential redelivery): first call applies, second is
@@ -215,6 +273,11 @@ Being explicit about what's *not* here:
 - **SQLite in this environment** means the concurrency protection for
   same-loan races leans on SQLite's own single-writer behavior rather than a proven
   Postgres row lock — see the Concurrency strategy section for the full caveat.
+- **The admin panel is entirely read-only and unauthenticated**, like the rest of
+  the read endpoints it's built on. A real ops tool would need its own
+  authentication/RBAC (not the webhook token, which is a different trust boundary),
+  and likely audit logging of *who* viewed sensitive reconciliation data, not just
+  the payment/loan mutations themselves.
 
 ## AI usage
 
@@ -252,4 +315,31 @@ This implementation was built with Claude Code (Claude models), used as follows:
   and hit the webhook directly with `curl` for the no-token/valid/duplicate/unknown-loan
   cases to see real HTTP responses, not just test assertions; read every line of the
   final diff against each numbered requirement in the assignment brief.
+
+### Admin panel (frontend extension)
+
+- **Design**: had Claude explore the existing frontend in full (all 3 source files,
+  `package.json`, `vite.config.js`) before proposing anything, to confirm it was
+  genuinely a zero-dependency, router-free, single-file app rather than assuming so.
+  I made the explicit product/architecture calls myself via targeted questions —
+  separate route vs. same-page section, `react-router-dom` vs. tab state, whether to
+  add `GET /audit-log` — rather than letting the model default to the "smallest diff"
+  option; a take-home explicitly asking for product judgment warranted a real decision,
+  not the path of least resistance.
+- **Implementation**: Claude wrote the new backend endpoint, the router restructure
+  (moving the existing Feed screen verbatim to avoid regressing working code), and
+  `AdminPanel.jsx`. I directed the reason-to-color mapping rationale explicitly
+  (severity-based, not "just make rejections red") rather than accepting an arbitrary
+  first pass.
+- **What I verified, not just trusted**: ran the full backend suite after adding the
+  new endpoint (29 tests passing); built the frontend (`npm run build`) to catch
+  import/syntax errors before manual testing; ran both dev servers together and
+  exercised the real reconciliation flow via `curl` (applied, overpayment, unknown
+  loan, closed loan, and a duplicate redelivery) to generate real data; then drove an
+  actual browser via Playwright against the running app to confirm both routes render
+  correctly, the KPI numbers match the data exactly, the reason filter pills work
+  (clicking "Overpayment (1)" correctly narrowed the table to one row), and — the one
+  thing that was easy to get subtly wrong — that the duplicate redelivery appears
+  in the Issues feed's underlying event count but does *not* produce a phantom extra
+  row or an extra audit entry, matching the documented idempotency behavior.
 </content>

@@ -42,10 +42,16 @@ body {
 
 .app { max-width: 880px; margin: 0 auto; padding: 44px 20px 80px; }
 
+.topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
 .brand { display: flex; align-items: baseline; gap: 9px; }
 .brand h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
 .brand .tag { font-size: 13px; color: var(--muted); }
 .sub { color: var(--muted); font-size: 14px; margin: 6px 0 28px; }
+
+.nav { display: flex; gap: 4px; }
+.navlink { font-size: 13px; font-weight: 600; color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
+.navlink:hover { background: var(--surface-2); color: var(--text); }
+.navlink.active { background: var(--accent-weak); color: var(--accent); }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 26px; }
 .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow); }
@@ -78,6 +84,19 @@ tbody tr:hover { background: var(--surface-2); }
 .pbadge.applied { color: var(--green); background: var(--green-bg); }
 .pbadge.rejected { color: var(--red); background: var(--red-bg); }
 
+/* Rejection-reason badges, mapped by operational severity rather than
+   defaulting everything to red: unknown_loan is the most severe (money with
+   nowhere to go); duplicate_external_ref is benign, expected rail behaviour;
+   loan_not_active/invalid_amount are actionable but not urgent; overpayment
+   is informational (a business decision, not really an "error"). */
+.rbadge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }
+.rbadge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.rbadge.unknown_loan { color: var(--red); background: var(--red-bg); }
+.rbadge.duplicate_external_ref { color: var(--grey); background: var(--grey-bg); }
+.rbadge.loan_not_active { color: var(--amber); background: var(--amber-bg); }
+.rbadge.invalid_amount { color: var(--amber); background: var(--amber-bg); }
+.rbadge.overpayment { color: var(--blue); background: var(--blue-bg); }
+
 .btn { font: inherit; font-size: 13px; font-weight: 600; border-radius: 8px; padding: 6px 13px; cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
 .btn:hover { background: var(--surface-2); }
 .btn-primary { background: var(--accent); border-color: transparent; color: #fff; }
@@ -90,6 +109,19 @@ tbody tr:hover { background: var(--surface-2); }
 
 .skeleton { height: 14px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-2), var(--border), var(--surface-2)); background-size: 200% 100%; animation: sh 1.2s infinite; }
 @keyframes sh { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 13px 18px; border-bottom: 1px solid var(--border); }
+.filter-pill { font: inherit; font-size: 12.5px; font-weight: 600; border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 999px; padding: 5px 12px; cursor: pointer; }
+.filter-pill:hover { background: var(--surface-2); }
+.filter-pill.active { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
+
+.trail-row { padding: 10px 18px; border-top: 1px solid var(--border); font-size: 13px; }
+.trail-row:first-child { border-top: none; }
+.trail-action { font-weight: 600; }
+.trail-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.trail-detail { color: var(--muted); font-size: 12px; margin-top: 3px; font-family: var(--mono); }
+
+.stat.warn { border-left: 3px solid var(--red); }
 
 .todo { margin-top: 26px; border: 1.5px dashed var(--border); border-radius: var(--radius); padding: 22px; color: var(--muted); background: var(--surface-2); font-size: 14px; line-height: 1.55; }
 .todo h3 { margin: 0 0 8px; color: var(--text); font-size: 15px; }
