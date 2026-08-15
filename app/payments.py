@@ -13,7 +13,7 @@ this webhook — exactly as a real gateway/rail would. There is no separate
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-from .auth import require_webhook_token
+from .auth import require_webhook_auth
 from .db import get_db
 from .loans import _loan_out
 from .models import PaymentEvent
@@ -52,11 +52,15 @@ def list_payment_events(db=Depends(get_db)):
 
 @router.post("/webhooks/payments")
 def receive_payment(
-    body: PaymentIn, db=Depends(get_db), _token=Depends(require_webhook_token)
+    body: PaymentIn, db=Depends(get_db), _auth=Depends(require_webhook_auth)
 ):
     """A payment arrived from a rail — reconcile it on receipt. Always 200
     once authenticated: business outcomes (applied/rejected) are reported in
     the response body, not via HTTP status. See NOTES.md.
+
+    Authentication accepts either the shared ``X-Webhook-Token`` or a
+    provider-style HMAC signature (``X-Webhook-Signature`` +
+    ``X-Webhook-Timestamp``) — see app/auth.py.
     """
     payload = PaymentPayload(
         external_ref=body.external_ref,

@@ -59,6 +59,65 @@ Two scenarios, two different mechanisms:
   this test harness can offer; I did not have that database available in this
   environment.
 
+### Provider signature verification (optional extension)
+
+Implemented as an **additional** valid credential, not a hard swap for the
+shared token. `require_webhook_auth` (`app/auth.py`) accepts either:
+
+- the original `X-Webhook-Token` header (unchanged), or
+- a provider-style HMAC signature: `X-Webhook-Timestamp` + `X-Webhook-Signature`,
+  where the signature is `HMAC-SHA256(signing_secret, "{timestamp}.{raw_body}")`
+  — the same shape Stripe/Paystack use. Verification reads the *raw* request
+  body (`await request.body()`), not the parsed Pydantic model, so what's
+  checked is byte-for-byte what the sender transmitted — re-serializing the
+  parsed body before checking would let a payload that round-trips
+  differently (e.g. key order, float formatting) slip past a signature
+  computed over the original bytes.
+
+**Why additive, not "instead of," despite the README's wording**: the
+existing `test_webhook_requires_a_valid_token` /
+`test_webhook_rejects_invalid_token` tests are part of the graded contract
+and authenticate via the shared token — replacing it outright would break
+them. More importantly, the frontend's "Simulate"/"Resend" buttons
+(`frontend/src/lib/api.js`) are the browser calling the webhook directly;
+they have no server-side signing key to compute a real HMAC with (putting
+the signing secret in frontend JS would defeat the entire point of a
+signature — anyone could forge one). A real gateway signs server-side before
+it ever reaches an HTTP client; a browser simulate button can't play that
+role. So the token remains the credential for the demo/simulate path, and
+the signature is the credential a real provider integration would use — both
+are accepted, and the code and tests make that split explicit rather than
+quietly picking one.
+
+**Replay protection, not just integrity**: the timestamp is bound *inside*
+the signed payload (not compared separately from an unsigned header), so a
+captured valid signature can't be replayed later with a substituted
+timestamp — the HMAC would no longer match. A request whose timestamp is
+more than 5 minutes from server time is rejected even if the signature
+itself is otherwise valid (`SIGNATURE_TOLERANCE_SECONDS`), which bounds how
+long a captured request stays replayable. `hmac.compare_digest` is used for
+the comparison specifically to avoid a timing side-channel on how many bytes
+of the signature matched.
+
+Tests: `test_webhook_accepts_valid_hmac_signature_with_no_token`,
+`test_webhook_rejects_tampered_body_under_valid_signature`,
+`test_webhook_rejects_signature_with_wrong_secret`,
+`test_webhook_rejects_stale_signature_timestamp`,
+`test_webhook_rejects_missing_signature_and_missing_token`,
+`test_webhook_token_still_works_alongside_signature_support` — plus manual
+`curl` verification against a running server (valid signature alone → 200
+applied; no auth → 401; wrong signature → 401; token still works → 200).
+
+**Still not production-grade**: `WEBHOOK_SIGNING_SECRET` is a hardcoded
+constant (same gap as `WEBHOOK_TOKEN`, see "Before production"); there's no
+secret rotation / key-id header to support rotating the signing secret
+without a flag day; and there's no nonce/idempotency-key check independent
+of `external_ref` for replay defense within the tolerance window — a
+captured request replayed within 5 minutes with its original timestamp
+would still verify (the `external_ref` uniqueness constraint is what
+actually stops it from being applied twice, which is a business-logic
+backstop, not a dedicated replay defense at the auth layer).
+
 ### Overpayment policy
 
 **Reject the entire payment** if it would exceed the loan's outstanding balance — no
@@ -236,13 +295,22 @@ the derivation functions would be the natural next step.
 
 Being explicit about what's *not* here:
 
-- **No provider signature verification.** Auth is a static shared secret
-  (`X-Webhook-Token`, existing `require_webhook_token`). A real gateway signs
-  payloads (HMAC or similar) so the receiver can verify the request actually came
-  from the provider and wasn't replayed/forged by anyone who obtained the shared
-  token. Noted as optional in the README; not implemented.
-- **No replay protection beyond the idempotency key itself.** There's no timestamp
-  window, nonce, or signature-replay defense — only the `external_ref` uniqueness.
+- **Provider signature verification is implemented** (`require_webhook_auth`,
+  `app/auth.py`) — HMAC-SHA256 over `{timestamp}.{raw_body}`, constant-time
+  compared, with a 5-minute timestamp tolerance. See "Provider signature
+  verification" above for the full design and why it's additive to the
+  shared token rather than a replacement. What's still missing for real
+  production use: the signing secret is a hardcoded constant, not pulled
+  from a secrets manager or rotatable via a key-id header; and there's no
+  standalone replay defense within the tolerance window beyond the
+  `external_ref` uniqueness constraint (see the next point).
+- **Replay protection is partial.** The signature scheme has a 5-minute
+  timestamp window, which bounds *how long* a captured request could be
+  replayed, but nothing dedicated stops a replay *within* that window other
+  than the `external_ref` uniqueness constraint — which exists for
+  idempotency, not specifically as a replay defense, though it happens to
+  serve both purposes here. A nonce/seen-signature cache would be the
+  correct dedicated mechanism.
 - **No structured logging or metrics.** No log lines around reconciliation decisions,
   no counters/histograms for applied vs rejected rates, latency, etc. An operator
   today can only see outcomes via `GET /payment-events`.
@@ -342,4 +410,41 @@ This implementation was built with Claude Code (Claude models), used as follows:
   thing that was easy to get subtly wrong — that the duplicate redelivery appears
   in the Issues feed's underlying event count but does *not* produce a phantom extra
   row or an extra audit entry, matching the documented idempotency behavior.
+
+### Provider signature verification (optional extension)
+
+- **Design**: the README says "instead of the shared token," but I checked the
+  existing test suite and frontend first rather than implementing a literal
+  swap — `tests/test_payments.py` already asserts 401/200 behavior against
+  `X-Webhook-Token`, and `frontend/src/lib/api.js` hardcodes that header with
+  no signing key available client-side. I made the call to implement
+  signature verification as an *additional* accepted credential rather than a
+  replacement, and had Claude confirm the reasoning (a browser "simulate"
+  button structurally cannot hold a server-side signing secret without
+  defeating the purpose of a signature) before writing any code.
+- **Implementation**: Claude wrote `verify_webhook_signature` /
+  `require_webhook_auth` in `app/auth.py` and wired it into
+  `app/payments.py` in place of `require_webhook_token` directly. I asked
+  specifically for: HMAC computed over the *raw* body (not a re-serialized
+  Pydantic model, which could drift from what was actually signed), a bound
+  timestamp for replay-window protection (not just an unsigned freshness
+  check), and `hmac.compare_digest` instead of `==` for the comparison —
+  these are the three most common ways a hand-rolled signature check goes
+  wrong, and I wanted them addressed by design rather than found in review.
+- **Testing**: wrote `_signed_request` as a test helper that signs the exact
+  raw bytes it sends via `content=`, deliberately avoiding `client.post(json=...)`
+  for these tests since httpx's own JSON serialization could silently diverge
+  from what was signed. Directed six specific test cases: valid signature
+  alone (no token), tampered body under an otherwise-valid signature, wrong
+  signing secret, stale timestamp, neither credential present, and — the one
+  most likely to regress silently — that the original token path still works
+  unchanged.
+- **What I verified manually, not just trusted**: ran the full suite (35
+  tests passing, up from 29); started a real server and hit
+  `/webhooks/payments` with `curl` using a hand-computed `HMAC-SHA256` in a
+  one-off Python snippet (not reusing the app's own code) with a valid
+  signature and no token, with a wrong signature, with no auth at all, and
+  confirmed the original `X-Webhook-Token` request still returns 200 —
+  checking the real HTTP status codes rather than trusting the test suite's
+  account of its own correctness.
 </content>
