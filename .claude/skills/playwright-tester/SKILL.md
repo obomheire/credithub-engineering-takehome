@@ -39,6 +39,8 @@ Check for an existing `playwright.config.ts`. If missing, create a minimal one a
 project's framework (Next.js, Vite, static, etc.). Use `webServer` config to auto-start the dev
 server when tests run.
 
+> **IMPORTANT:** Before installing or upgrading Playwright, do not assume the installation commands in this skill are still current. First verify the latest official Playwright installation guidance and the current `@playwright/test` npm package status. Confirm that the proposed package names, installation commands, and browser installation commands are not deprecated or replaced. Use the current recommended approach from the official Playwright documentation when there is a difference.
+
 ## Workflow
 
 ### Phase 1: Assess
